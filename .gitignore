@@ -16,5 +16,8 @@ queue/
 CLAUDE.md
 AGENTS.md
 
+# Model checkpoints
+*.pt
+
 # Experimental code/artifacts
 dev/
