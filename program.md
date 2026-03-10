@@ -1,42 +1,102 @@
-# autoresearch
+# Multi-Agent Autoresearch Swarm (macOS)
 
-This is an experiment to have the LLM do its own research.
+This is a competitive and cooperative multi-agent experiment where multiple LLM subagents conduct independent machine learning research, share insights, and compete to achieve the lowest `val_bpb` on Apple Silicon (MPS).
 
-## Setup
+## System Architecture & Roles
 
-To set up a new experiment, work with the user to:
+The system consists of one **Master Agent** and **N Subagents** (where N is the total number of subagents specified by the user at launch).
 
-1. **Agree on a run tag**: propose a tag based on today's date (e.g. `mar5`). The branch `autoresearch/<tag>` must not already exist — this is a fresh run.
-2. **Create the branch**: `git checkout -b autoresearch/<tag>` from current master.
-3. **Read the in-scope files**: The repo is small. Read these files for full context:
-   - `README.md` — repository context.
-   - `prepare.py` — fixed constants, data prep, tokenizer, dataloader, evaluation. Do not modify.
-   - `train.py` — the file you modify. Model architecture, optimizer, training loop.
-4. **Verify data exists**: Check that `~/.cache/autoresearch/` contains data shards and a tokenizer. If not, tell the human to run `uv run prepare.py`.
-5. **Initialize results.tsv**: Create `results.tsv` with just the header row. The baseline will be recorded after the first run.
-6. **Confirm and go**: Confirm setup looks good.
+### 1. Master Agent Initialization
 
-Once you get confirmation, kick off the experimentation.
+If you are the Master Agent, your role is strictly to orchestrate the environment:
 
-## Experimentation
+1. Receive the target number of subagents (**N**) from the user.
+2. Run `./launch-agents.sh N <tag>` to create the worktree structure. This will:
+   - Create `worktrees/shared/` with empty `lessons.md` and `insights.md`
+   - Create `worktrees/agent_0/` through `worktrees/agent_{N-1}/` as git worktrees on separate branches
+   - Initialize `results.tsv` in each agent directory
+   - Copy `train_with_lock.sh` into each agent directory
+3. Spawn the **N** Subagents. Provide **exactly** this prompt to each subagent: "You are Sub Agent {i}. There are {N} total agents in this swarm. Your working directory is worktrees/agent_{i}/. Read program.md in your directory to understand your rules, constraints, and goals. Begin your experiment loop."
 
-Each experiment runs on a single GPU. The training script runs for a **fixed time budget of 5 minutes** (wall clock training time, excluding startup/compilation). You launch it simply as: `uv run train.py`.
+## Experimentation Setup (Subagent)
+
+Before you begin your loop, ensure your workspace is ready:
+
+1. Read the in-scope files in your directory for context (`README.md`, `prepare.py`, `train.py`).
+2. Do not modify `prepare.py`. It is read-only and contains the fixed evaluation, data loading, tokenizer, and constants.
+3. Verify data exists in `~/.cache/autoresearch/`.
+4. Initialize your local `results.tsv` with just the header row (if not already done by launcher).
+5. Confirm `../shared/lessons.md` and `../shared/insights.md` exist.
+
+## Rules of Engagement
+
+You run on a shared MPS GPU (Apple Silicon). The training script runs for a fixed time budget of 5 minutes. **Only one agent can train at a time** — use the lock wrapper.
 
 **What you CAN do:**
-- Modify `train.py` — this is the only file you edit. Everything is fair game: model architecture, optimizer, hyperparameters, training loop, batch size, model size, etc.
+
+* Modify your local `train.py` — this is the only code file you edit. Everything is fair game: model architecture, optimizer, hyperparameters, training loop, batch size, model size, etc.
 
 **What you CANNOT do:**
-- Modify `prepare.py`. It is read-only. It contains the fixed evaluation, data loading, tokenizer, and training constants (time budget, sequence length, etc).
-- Install new packages or add dependencies. You can only use what's already in `pyproject.toml`.
-- Modify the evaluation harness. The `evaluate_bpb` function in `prepare.py` is the ground truth metric.
 
-**The goal is simple: get the lowest val_bpb.** Since the time budget is fixed, you don't need to worry about training time — it's always 5 minutes. Everything is fair game: change the architecture, the optimizer, the hyperparameters, the batch size, the model size. The only constraint is that the code runs without crashing and finishes within the time budget.
+* Modify `prepare.py`.
+* Modify another agent's files.
+* Install new packages or add dependencies. Use what's in `pyproject.toml`.
+* Modify the evaluation harness (`evaluate_bpb` in `prepare.py`).
 
-**VRAM** is a soft constraint. Some increase is acceptable for meaningful val_bpb gains, but it should not blow up dramatically.
+**Evaluation:**
+The goal is simple: get the lowest `val_bpb`. Since the time budget is fixed (5 minutes), you don't need to worry about training time — it's always 5 minutes. Memory is a soft constraint; some increase is acceptable for meaningful gains, but do not OOM.
 
-**Simplicity criterion**: All else being equal, simpler is better. A small improvement that adds ugly complexity is not worth it. Conversely, removing something and getting equal or better results is a great outcome — that's a simplification win. When evaluating whether to keep a change, weigh the complexity cost against the improvement magnitude. A 0.001 val_bpb improvement that adds 20 lines of hacky code? Probably not worth it. A 0.001 val_bpb improvement from deleting code? Definitely keep. An improvement of ~0 but much simpler code? Keep.
+**Simplicity criterion:**
+All else being equal, simpler is better. A 0.001 val_bpb improvement that adds 20 lines of hacky code is not worth it. A 0.001 val_bpb improvement from deleting code is a huge win.
 
-**The first run**: Your very first run should always be to establish the baseline, so you will run the training script as is.
+## MPS GPU Coordination
+
+This Mac has **one shared MPS GPU**. Only one agent can train at a time.
+
+**To run training**, use the lock wrapper instead of calling `uv run train.py` directly:
+
+```bash
+./train_with_lock.sh <your_agent_number>
+```
+
+This acquires an atomic MPS lock, runs training, and releases the lock automatically (even on crash). If the GPU is busy (another agent is training), the wrapper will wait and retry every 10 seconds.
+
+**While waiting for the GPU**, use your time productively:
+
+1. Read other agents' results: `cat ../agent_*/results.tsv`
+2. Read shared knowledge: `cat ../shared/lessons.md`
+3. Read shared insights: `cat ../shared/insights.md`
+4. Plan your next experiment based on what you've learned
+5. Analyze patterns across all agents' results
+6. Write hypotheses to `../shared/insights.md`
+
+## Logging & Knowledge Sharing
+
+You are required to maintain three distinct logs to facilitate the swarm's collective intelligence:
+
+### 1. `results.tsv`
+
+Log every experiment here (tab-separated). The headers are:
+`commit` \t `val_bpb` \t `memory_gb` \t `status` \t `description`
+*(Use 0.000000 for crashes. Status must be `keep`, `discard`, or `crash`)*
+
+### 2. `../shared/lessons.md`
+
+A running log of empirical facts shared across all agents. What worked? What crashed? What blew up memory? Keep this brief and factual so other agents can parse it quickly. **Append** to this file after every experiment. Example:
+
+* *[AGENT_0] [keep] GeLU activation: 1.523 (-0.004 from baseline)*
+* *[AGENT_1] [discard] doubled batch size: OOM crash*
+* *[AGENT_0] [keep] gradient clipping (1.0): 1.521 (-0.002)*
+
+### 3. `../shared/insights.md`
+
+A higher-level log for your architectural hypotheses. Why do you think a certain mechanism failed? What is the overarching direction you are exploring? Read peers' insights to branch out into uncharted territory instead of overlapping. Format:
+
+```
+## [AGENT_N] Hypothesis title
+Explanation and reasoning.
+Status: untested / promising / dead end
+```
 
 ## Output format
 
@@ -55,60 +115,47 @@ num_params_M:     50.3
 depth:            8
 ```
 
-Note that the script is configured to always stop after 5 minutes, so depending on the computing platform of this computer the numbers might look different. You can extract the key metric from the log file:
+Extract the key metric from the log file:
 
 ```
-grep "^val_bpb:" run.log
+grep "^val_bpb:\|^peak_vram_mb:" run.log
 ```
 
-## Logging results
+## The Experiment Loop
 
-When an experiment is done, log it to `results.tsv` (tab-separated, NOT comma-separated — commas break in descriptions).
+As Agent `i`, you operate autonomously in `worktrees/agent_i/`.
 
-The TSV has a header row and 5 columns:
+**Initial Step: The Baseline**
 
-```
-commit	val_bpb	memory_gb	status	description
-```
+* **If you are Agent 0:** Your very first task is to establish the baseline. Do NOT modify `train.py` on your first attempt. Execute the script as-is, evaluate it, and log the initial `val_bpb` in your `results.tsv` (status: `keep`, description: `baseline`) and `../shared/lessons.md`. Once the baseline is logged, enter the loop below.
+* **If you are Agent 1 to N-1:** Skip the baseline. You are free to begin radical exploration and modify `train.py` immediately.
 
-1. git commit hash (short, 7 chars)
-2. val_bpb achieved (e.g. 1.234567) — use 0.000000 for crashes
-3. peak memory in GB, round to .1f (e.g. 12.3 — divide peak_vram_mb by 1024) — use 0.0 for crashes
-4. status: `keep`, `discard`, or `crash`
-5. short text description of what this experiment tried
+**LOOP FOREVER:**
 
-Example:
+1. **Scout:** Read the `../shared/lessons.md` and `../shared/insights.md`. Incorporate other agents' successes and avoid their failures.
+2. **Hypothesize:** Formulate an experimental idea and write your theory in `../shared/insights.md`.
+3. **Execute:** Modify `train.py` directly. Git commit your changes.
+4. **Run:** Execute `./train_with_lock.sh <your_agent_number>` (this handles MPS lock + redirects output to `run.log`). Do NOT let output flood your context.
+5. **Evaluate:** Extract metrics using `grep "^val_bpb:\|^peak_vram_mb:" run.log`.
+   * If the run crashed (empty grep), read the stack trace with `tail -n 50 run.log`. Fix minor bugs. If fundamentally broken, discard.
+6. **Log:**
+   * Record the result in `results.tsv`.
+   * Document what happened in `../shared/lessons.md`.
+7. **Branch Management:**
+   * If `val_bpb` improved (lower), keep the commit and advance.
+   * If `val_bpb` is equal or worse, `git reset --hard HEAD~1` to revert to your last good state.
 
-```
-commit	val_bpb	memory_gb	status	description
-a1b2c3d	0.997900	44.0	keep	baseline
-b2c3d4e	0.993200	44.2	keep	increase LR to 0.04
-c3d4e5f	1.005000	44.0	discard	switch to GeLU activation
-d4e5f6g	0.000000	0.0	crash	double model width (OOM)
-```
+**Timeout**: Each experiment should take ~5 minutes training (+ startup/eval overhead). If a run exceeds 10 minutes, kill it and treat it as a failure (discard and revert).
 
-## The experiment loop
+**Crashes**: If a run crashes (OOM, bug, etc.), use your judgment: If it's easy to fix (typo, missing import), fix and re-run. If the idea is fundamentally broken, log "crash" and move on.
 
-The experiment runs on a dedicated branch (e.g. `autoresearch/mar5` or `autoresearch/mar5-gpu0`).
+**Cross-Agent Intelligence**: Every 3-5 experiments, do a reconnaissance round:
 
-LOOP FOREVER:
+1. Read all agents' results: `for d in ../agent_*/; do echo "=== $d ==="; cat "$d/results.tsv"; done`
+2. Read shared lessons and insights
+3. Look for ideas that improved val_bpb that you haven't incorporated
+4. Avoid techniques that consistently fail across agents
 
-1. Look at the git state: the current branch/commit we're on
-2. Tune `train.py` with an experimental idea by directly hacking the code.
-3. git commit
-4. Run the experiment: `uv run train.py > run.log 2>&1` (redirect everything — do NOT use tee or let output flood your context)
-5. Read out the results: `grep "^val_bpb:\|^peak_vram_mb:" run.log`
-6. If the grep output is empty, the run crashed. Run `tail -n 50 run.log` to read the Python stack trace and attempt a fix. If you can't get things to work after more than a few attempts, give up.
-7. Record the results in the tsv
-8. If val_bpb improved (lower), you "advance" the branch, keeping the git commit
-9. If val_bpb is equal or worse, you git reset back to where you started
+**Exploration Diversity**: To maximize collective progress, diversify your approach. If another agent is exploring architecture changes, focus on optimizer tuning. If another is trying larger models, try smaller models with better hyperparameters. Avoid running the exact same experiment as another agent.
 
-The idea is that you are a completely autonomous researcher trying things out. If they work, keep. If they don't, discard. And you're advancing the branch so that you can iterate. If you feel like you're getting stuck in some way, you can rewind but you should probably do this very very sparingly (if ever).
-
-**Timeout**: Each experiment should take ~5 minutes total (+ a few seconds for startup and eval overhead). If a run exceeds 10 minutes, kill it and treat it as a failure (discard and revert).
-
-**Crashes**: If a run crashes (OOM, or a bug, or etc.), use your judgment: If it's something dumb and easy to fix (e.g. a typo, a missing import), fix it and re-run. If the idea itself is fundamentally broken, just skip it, log "crash" as the status in the tsv, and move on.
-
-**NEVER STOP**: Once the experiment loop has begun (after the initial setup), do NOT pause to ask the human if you should continue. Do NOT ask "should I keep going?" or "is this a good stopping point?". The human might be asleep, or gone from a computer and expects you to continue working *indefinitely* until you are manually stopped. You are autonomous. If you run out of ideas, think harder — read papers referenced in the code, re-read the in-scope files for new angles, try combining previous near-misses, try more radical architectural changes. The loop runs until the human interrupts you, period.
-
-As an example use case, a user might leave you running while they sleep. If each experiment takes you ~5 minutes then you can run approx 12/hour, for a total of about 100 over the duration of the average human sleep. The user then wakes up to experimental results, all completed by you while they slept!
+**NEVER STOP:** Do NOT pause to ask the human if you should continue. The human expects you to work indefinitely. If you run out of ideas, read your peers' files, read the code again, combine near-misses, or try radical simplifications. You are an autonomous researcher in a competitive swarm. May the best agent win.
