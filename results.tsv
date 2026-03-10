@@ -1,1 +1,3 @@
 commit	val_bpb	memory_gb	status	description
+b18fae5	2.053567	0.0	keep	baseline
+d85f2df	1.642739	0.0	keep	halve batch size (32K tokens) and device batch (8) for more steps
